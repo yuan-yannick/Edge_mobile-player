@@ -1,0 +1,28 @@
+/* 长按加速播放 - 内容样式 */
+
+/* 抑制移动端长按视频时弹出的“保存图像/复制”等系统菜单与文字选择 */
+video {
+  -webkit-touch-callout: none !important;
+  -webkit-user-select: none !important;
+  user-select: none !important;
+}
+
+/* 倍速提示角标 */
+.lpvs-badge {
+  position: fixed;
+  z-index: 2147483647;
+  display: none;
+  min-width: 60px;
+  padding: 7px 12px;
+  font: 600 14px/1 "Segoe UI", -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+  color: #fff;
+  text-align: center;
+  background: rgba(17, 17, 17, 0.82);
+  border-radius: 18px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+  -webkit-backdrop-filter: blur(4px);
+  backdrop-filter: blur(4px);
+  pointer-events: none;
+  letter-spacing: 0.3px;
+  white-space: nowrap;
+}

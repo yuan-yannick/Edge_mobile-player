@@ -2,7 +2,7 @@
 // @name         长按加速播放
 // @name:en      Long-Press Video Speed
 // @namespace    lpvs.longpress.speed
-// @version      1.4.0
+// @version      1.3.0
 // @description  移动端长按网页视频约0.35秒即临时加速播放(默认3倍速)，松手恢复原速；电脑端鼠标左键长按视频、或按住 Shift+方向右 加速，松开恢复。配合篡改猴使用，手机 Edge / Firefox / 桌面浏览器均可用。
 // @description:en  Long-press any web video (finger or mouse, default 3x) to fast-forward temporarily; on desktop also hold Shift+Right. Release to restore. Works wherever Tampermonkey runs.
 // @author       lpvs
@@ -31,7 +31,7 @@
    *    开着中文输入法也能触发；组合键两键先后按下顺序不限；
    *  - 鼠标松开事件丢失(如在浏览器界面外松开)时自动自我修复；
    *  - 短按(暂停/播放)、滑动(进度/音量)等原生手势不受影响；
-   *  - 通过 ratechange 与短周期校正抵抗 YouTube、抖音对倍速的重置；
+   *  - 通过 ratechange 与短周期校正抵抗 YouTube 对倍速的重置；
    *  - 屏蔽长按视频弹出的“保存图像/复制”系统菜单。
    * 与扩展版的差异：
    *  - 设置存储 chrome.storage.sync -> GM_setValue(单键 settings 对象)；
@@ -59,12 +59,6 @@
   const RATE_EPSILON = 0.01;
   const RATE_RECHECK_MS = 120;
   const CLICK_SUPPRESS_MS = 700;
-  const PLAYER_SELECTOR = [
-    ".html5-video-player", "#player-container", "#movie_player", "ytm-player",
-    "xg-video-container", "xg-player", ".xgplayer", ".douyin-player",
-    "[class*='basePlayerContainer']", "[data-e2e='feed-active-video']",
-    ".video-js", "[data-video-player]",
-  ].join(", ");
 
   const KEY = "settings";
 
@@ -180,11 +174,13 @@
   function videosFromNode(node) {
     if (!node || node.nodeType !== Node.ELEMENT_NODE) return [];
     if (node.tagName === "VIDEO") return [node];
-    const player = node.closest && node.closest(PLAYER_SELECTOR);
+    const player = node.closest && node.closest(
+      ".html5-video-player, #player-container, #movie_player, ytm-player, .video-js, [data-video-player]"
+    );
     return player ? Array.from(player.querySelectorAll("video")) : [];
   }
 
-  // YouTube、抖音的触摸/点击目标通常是覆盖在 video 上方的兄弟节点。
+  // YouTube 的触摸/点击目标通常是覆盖在 video 上方的兄弟节点。
   function findVideoForEvent(event, x, y) {
     const candidates = new Set();
     const path = typeof event.composedPath === "function" ? event.composedPath() : [event.target];

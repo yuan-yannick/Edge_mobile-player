@@ -1,25 +1,13 @@
 /*
- * 长按加速播放 - 内容脚本
- * --------------------------------------------------------------
- * 在任意网页的 <video> 上长按屏幕（默认 350ms）即临时加速播放，
- * 松手自动恢复原速。普通点击、滑动、视频自带控制条均不受影响。
- * 电脑端可按住 Shift+方向右 实现同样的临时加速，松开任一键恢复。
+ * 长按加速播放 - 浏览器扩展内容脚本
  *
- * 设计要点：
- *  - 只在 touchstart 时启动一个长按计时器，未触发前不拦截任何事件，
- *    因此短按(暂停/播放)、滑动(进度/音量)仍由网站自己处理。
- *  - 电脑端键盘：按住 Shift+方向右 立即加速，松开任一键恢复；
- *    仅当页面存在“播放中”的视频时才拦截该组合键，其余场景原样放行。
- *  - 计时器触发后进入“加速模式”，设置 playbackRate 并显示角标。
- *  - 进入加速模式后吞掉松手时产生的 click，避免误触暂停。
- *  - 监听 ratechange 以抵抗部分网站(如 YouTube)对倍速的重置。
- *  - 阻止视频上的长按上下文菜单，避免弹出“保存图片/复制”等菜单。
+ * 移动端/触摸屏：按住播放器临时加速，松开恢复。
+ * 桌面端：鼠标左键按住播放器，或按住 Shift + → 临时加速。
  */
 
 (function () {
   "use strict";
 
-  // 默认设置（与 background.js / popup.js 保持一致）
   const DEFAULTS = {
     enabled: true,
     speed: 3.0,
@@ -28,295 +16,397 @@
     vibrate: true,
   };
 
+  const RATE_EPSILON = 0.01;
+  const RATE_RECHECK_MS = 120;
+  const CLICK_SUPPRESS_MS = 700;
+
   let settings = Object.assign({}, DEFAULTS);
-
-  // 当前正在追踪的触摸 / 键盘组合键会话
-  // { id, source: "touch"|"keyboard", video, originalRate, timer, startX, startY, speedMode }
   let active = null;
-
-  // 用于在松手后吞掉一次 click 的时间窗
+  let badge = null;
   let suppressClickUntil = 0;
+  let arrowHeld = false;
 
-  /* ---------- 设置加载 ---------- */
+  function normalizedSettings(value) {
+    const next = Object.assign({}, DEFAULTS, value || {});
+    next.enabled = next.enabled !== false;
+    next.speed = Math.min(16, Math.max(1.25, Number(next.speed) || DEFAULTS.speed));
+    next.delay = Math.min(1000, Math.max(100, Number(next.delay) || DEFAULTS.delay));
+    next.moveTolerance = Math.min(50, Math.max(3, Number(next.moveTolerance) || DEFAULTS.moveTolerance));
+    next.vibrate = next.vibrate !== false;
+    return next;
+  }
+
   function loadSettings() {
     try {
-      chrome.storage.sync.get(DEFAULTS, function (s) {
-        settings = Object.assign({}, DEFAULTS, s);
+      chrome.storage.sync.get(DEFAULTS, function (value) {
+        settings = normalizedSettings(value);
       });
-    } catch (e) {
-      // 非扩展环境(如 bookmarklet 复用)下退化为默认值
-      settings = Object.assign({}, DEFAULTS);
+    } catch (_) {
+      settings = normalizedSettings();
     }
   }
+
   loadSettings();
 
   try {
     chrome.storage.onChanged.addListener(function (changes, area) {
       if (area !== "sync") return;
-      for (const k in changes) settings[k] = changes[k].newValue;
-      // 若正在加速且倍速被改了，实时更新
-      if (active && active.speedMode) {
-        try { active.video.playbackRate = settings.speed; } catch (_) {}
+      const patch = {};
+      for (const key in changes) patch[key] = changes[key].newValue;
+      settings = normalizedSettings(Object.assign({}, settings, patch));
+      if (!settings.enabled) {
+        clearActive();
+      } else if (active && active.speedMode) {
+        applyTargetRate(active);
         updateBadge(settings.speed);
       }
     });
-  } catch (e) { /* 非扩展环境忽略 */ }
+  } catch (_) {}
 
-  /* ---------- 工具函数 ---------- */
-  function findTouch(list, id) {
-    for (let i = 0; i < list.length; i++) if (list[i].identifier === id) return list[i];
-    return null;
+  function isEditable(target) {
+    if (!target || target.nodeType !== Node.ELEMENT_NODE) return false;
+    return !!target.closest("input, textarea, select, [contenteditable='true']");
   }
 
-  // 根据触摸点找到对应的 <video>。
-  // 优先命中视频本身；其次向上找包含视频的播放器容器；最后页面只有一个视频时直接用。
-  function findVideoFor(el, x, y) {
-    if (!el || !el.closest) return null;
-    const direct = el.closest("video");
-    if (direct) return direct;
+  function videoRect(video) {
+    try { return video.getBoundingClientRect(); } catch (_) { return null; }
+  }
 
-    let node = el;
-    for (let i = 0; i < 6 && node; i++, node = node.parentElement) {
-      const vids = node.querySelectorAll ? node.querySelectorAll("video") : null;
-      if (vids && vids.length) {
-        let best = null, bestArea = 0;
-        for (const v of vids) {
-          const r = v.getBoundingClientRect();
-          if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) return v;
-          const area = r.width * r.height;
-          if (area > bestArea) { bestArea = area; best = v; }
-        }
-        return best;
+  function isVisibleVideo(video) {
+    const rect = videoRect(video);
+    if (!rect || rect.width < 2 || rect.height < 2) return false;
+    return rect.bottom > 0 && rect.right > 0 && rect.top < innerHeight && rect.left < innerWidth;
+  }
+
+  function pointInside(rect, x, y) {
+    return !!rect && x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
+  }
+
+  function videosFromNode(node) {
+    if (!node || node.nodeType !== Node.ELEMENT_NODE) return [];
+    if (node.tagName === "VIDEO") return [node];
+
+    const player = node.closest && node.closest(
+      ".html5-video-player, #player-container, #movie_player, ytm-player, .video-js, [data-video-player]"
+    );
+    if (player) return Array.from(player.querySelectorAll("video"));
+    return [];
+  }
+
+  // YouTube 的可点击层是 video 的兄弟节点，并非 video 的父/子节点。
+  // 因此同时使用事件路径、播放器容器和触点矩形来定位真正的视频。
+  function findVideoForEvent(event, x, y) {
+    const candidates = new Set();
+    const path = typeof event.composedPath === "function" ? event.composedPath() : [event.target];
+
+    for (const node of path) {
+      for (const video of videosFromNode(node)) candidates.add(video);
+    }
+
+    if (document.elementsFromPoint) {
+      for (const node of document.elementsFromPoint(x, y)) {
+        for (const video of videosFromNode(node)) candidates.add(video);
       }
     }
-    const all = document.querySelectorAll("video");
-    if (all.length === 1) return all[0];
-    return null;
+
+    for (const video of document.querySelectorAll("video")) {
+      const rect = videoRect(video);
+      if (pointInside(rect, x, y)) candidates.add(video);
+    }
+
+    let best = null;
+    let bestScore = -Infinity;
+    for (const video of candidates) {
+      const rect = videoRect(video);
+      if (!rect || rect.width < 2 || rect.height < 2) continue;
+      const underPointer = pointInside(rect, x, y);
+      const visible = isVisibleVideo(video);
+      const score = (underPointer ? 1e12 : 0) + (!video.paused && !video.ended ? 1e9 : 0) +
+        (visible ? 1e6 : 0) + Math.min(rect.width * rect.height, 999999);
+      if (score > bestScore) {
+        best = video;
+        bestScore = score;
+      }
+    }
+
+    // 普通网页常常只有一个视频，而事件目标是覆盖在它上方的自定义控制层。
+    if (!best) {
+      const all = Array.from(document.querySelectorAll("video")).filter(isVisibleVideo);
+      if (all.length === 1 && pointInside(videoRect(all[0]), x, y)) best = all[0];
+    }
+    return best;
   }
 
-  /* ---------- 角标 ---------- */
-  let badge = null;
+  function findPlayingVideo() {
+    let best = null;
+    let bestArea = 0;
+    for (const video of document.querySelectorAll("video")) {
+      if (video.paused || video.ended || !isVisibleVideo(video)) continue;
+      const rect = videoRect(video);
+      const area = rect.width * rect.height;
+      if (area > bestArea) {
+        best = video;
+        bestArea = area;
+      }
+    }
+    return best;
+  }
+
   function ensureBadge() {
-    if (badge) return badge;
+    if (badge && badge.isConnected) return badge;
     badge = document.createElement("div");
     badge.className = "lpvs-badge";
     badge.style.display = "none";
     document.documentElement.appendChild(badge);
     return badge;
   }
+
   function showBadge(rate, x, y) {
-    ensureBadge();
-    badge.textContent = "▶▶ " + Number(rate).toFixed(1) + "x";
-    // 放在触摸点上方，越界则贴边
-    const w = 92, h = 34;
-    let left = x - w / 2;
-    let top = y - h - 16;
-    left = Math.max(6, Math.min(left, window.innerWidth - w - 6));
+    const element = ensureBadge();
+    element.textContent = "▶▶ " + Number(rate).toFixed(1) + "x";
+    const width = 92;
+    const height = 34;
+    let left = x - width / 2;
+    let top = y - height - 16;
+    left = Math.max(6, Math.min(left, innerWidth - width - 6));
     if (top < 6) top = y + 20;
-    badge.style.left = left + "px";
-    badge.style.top = top + "px";
-    badge.style.display = "block";
+    element.style.left = left + "px";
+    element.style.top = top + "px";
+    element.style.display = "block";
   }
+
   function updateBadge(rate) {
     if (badge) badge.textContent = "▶▶ " + Number(rate).toFixed(1) + "x";
   }
+
   function hideBadge() {
     if (badge) badge.style.display = "none";
   }
 
-  /* ---------- 加速 / 恢复 ---------- */
-  function activate(at) {
-    if (!at || !at.video) return;
-    at.speedMode = true;
-    at.originalRate = at.video.playbackRate;
-    try { at.video.playbackRate = settings.speed; } catch (_) {}
-    at.video.addEventListener("ratechange", onRateChange);
-    showBadge(settings.speed, at.startX, at.startY);
+  function applyTargetRate(session) {
+    if (!session || !session.speedMode || !session.video || !session.video.isConnected) return;
+    if (Math.abs(session.video.playbackRate - settings.speed) > RATE_EPSILON) {
+      try { session.video.playbackRate = settings.speed; } catch (_) {}
+    }
+  }
+
+  function onRateChange(event) {
+    if (!active || active.video !== event.currentTarget || !active.speedMode) return;
+    applyTargetRate(active);
+  }
+
+  function activate(session) {
+    if (!session || session !== active || !session.video || !session.video.isConnected) {
+      clearActive();
+      return;
+    }
+    session.timer = null;
+    session.speedMode = true;
+    session.originalRate = session.video.playbackRate;
+    session.video.addEventListener("ratechange", onRateChange);
+    applyTargetRate(session);
+    // YouTube 会在自己的长按逻辑中反复写 playbackRate；定时校正可避免被覆盖。
+    session.rateTimer = setInterval(function () { applyTargetRate(session); }, RATE_RECHECK_MS);
+    showBadge(settings.speed, session.startX, session.startY);
     if (settings.vibrate && navigator.vibrate) {
       try { navigator.vibrate(15); } catch (_) {}
     }
   }
 
-  function onRateChange(e) {
-    const at = active;
-    if (!at || !at.speedMode || at.video !== e.currentTarget) return;
-    // 倍速被网站改回去了，重新设回目标倍速
-    if (Math.abs(at.video.playbackRate - settings.speed) > 0.01) {
-      try { at.video.playbackRate = settings.speed; } catch (_) {}
+  function restore(session) {
+    if (!session) return;
+    session.speedMode = false;
+    if (session.rateTimer) {
+      clearInterval(session.rateTimer);
+      session.rateTimer = null;
     }
-  }
-
-  function restore(at) {
-    if (!at) return;
-    at.speedMode = false;
-    if (at.video) at.video.removeEventListener("ratechange", onRateChange);
-    try { if (at.video) at.video.playbackRate = at.originalRate; } catch (_) {}
+    if (session.video) session.video.removeEventListener("ratechange", onRateChange);
+    try {
+      if (session.video && session.video.isConnected) session.video.playbackRate = session.originalRate;
+    } catch (_) {}
     hideBadge();
   }
 
-  function clearActive() {
-    const at = active;
-    if (!at) return;
-    if (at.timer) { clearTimeout(at.timer); at.timer = null; }
-    if (at.speedMode) restore(at);
+  function clearActive(options) {
+    const session = active;
+    if (!session) return;
+    if (session.timer) clearTimeout(session.timer);
+    if (session.speedMode) {
+      if (options && options.suppressClick) suppressClickUntil = Date.now() + CLICK_SUPPRESS_MS;
+      restore(session);
+    }
     active = null;
   }
 
-  /* ---------- 吞掉松手后的 click ---------- */
-  function swallowClickOnce() {
-    suppressClickUntil = Date.now() + 500;
-    const handler = function (e) {
-      if (Date.now() < suppressClickUntil) {
-        e.preventDefault();
-        e.stopPropagation();
-      }
-      document.removeEventListener("click", handler, true);
+  function beginPress(source, id, video, x, y) {
+    active = {
+      source: source,
+      id: id,
+      video: video,
+      originalRate: video.playbackRate,
+      timer: null,
+      rateTimer: null,
+      startX: x,
+      startY: y,
+      speedMode: false,
     };
-    document.addEventListener("click", handler, true);
+    const session = active;
+    session.timer = setTimeout(function () { activate(session); }, settings.delay);
   }
 
-  /* ---------- 触摸事件 ---------- */
-  function onTouchStart(e) {
-    if (!settings.enabled) return;
-    if (active) return; // 已有一个手指在追踪中
+  function onPointerDown(event) {
+    if (!settings.enabled || active || !event.isPrimary || event.button !== 0) return;
+    if (event.pointerType === "mouse" && isEditable(event.target)) return;
+    const video = findVideoForEvent(event, event.clientX, event.clientY);
+    if (!video) return;
+    beginPress("pointer", event.pointerId, video, event.clientX, event.clientY);
+  }
 
-    for (let i = 0; i < e.changedTouches.length; i++) {
-      const t = e.changedTouches[i];
-      const el = document.elementFromPoint(t.clientX, t.clientY);
-      const video = findVideoFor(el, t.clientX, t.clientY);
+  function onPointerMove(event) {
+    const session = active;
+    if (!session || session.source !== "pointer" || session.id !== event.pointerId) return;
+    if (event.pointerType === "mouse" && !(event.buttons & 1)) {
+      clearActive();
+      return;
+    }
+    if (!session.speedMode && Math.hypot(event.clientX - session.startX, event.clientY - session.startY) > settings.moveTolerance) {
+      clearActive();
+    }
+  }
+
+  function onPointerEnd(event) {
+    const session = active;
+    if (!session || session.source !== "pointer" || session.id !== event.pointerId) return;
+    if (event.type === "pointerup" && event.pointerType === "mouse" && event.button !== 0) return;
+    const wasActive = session.speedMode;
+    clearActive({ suppressClick: wasActive });
+    if (wasActive && event.cancelable) event.preventDefault();
+  }
+
+  // Pointer Events 不可用时给旧版移动浏览器保留 Touch Events 回退。
+  function findTouch(list, id) {
+    for (let i = 0; i < list.length; i++) if (list[i].identifier === id) return list[i];
+    return null;
+  }
+
+  function onTouchStart(event) {
+    if (window.PointerEvent || !settings.enabled || active) return;
+    for (const touch of event.changedTouches) {
+      const video = findVideoForEvent(event, touch.clientX, touch.clientY);
       if (!video) continue;
-
-      active = {
-        id: t.identifier,
-        source: "touch",
-        video: video,
-        originalRate: video.playbackRate,
-        timer: null,
-        startX: t.clientX,
-        startY: t.clientY,
-        speedMode: false,
-      };
-      const at = active;
-      at.timer = setTimeout(function () {
-        if (active === at) activate(at);
-      }, settings.delay);
+      beginPress("touch", touch.identifier, video, touch.clientX, touch.clientY);
       break;
     }
   }
 
-  function onTouchMove(e) {
-    const at = active;
-    if (!at) return;
-    const t = findTouch(e.changedTouches, at.id);
-    if (!t) return;
-    const dx = t.clientX - at.startX;
-    const dy = t.clientY - at.startY;
-    // 还没进入加速模式时，移动超过阈值视为滑动 -> 取消
-    if (!at.speedMode && Math.hypot(dx, dy) > settings.moveTolerance) {
+  function onTouchMove(event) {
+    const session = active;
+    if (!session || session.source !== "touch") return;
+    const touch = findTouch(event.touches, session.id) || findTouch(event.changedTouches, session.id);
+    if (!touch) return;
+    if (!session.speedMode && Math.hypot(touch.clientX - session.startX, touch.clientY - session.startY) > settings.moveTolerance) {
       clearActive();
     }
-    // 已进入加速模式：允许手指小幅移动，保持加速
   }
 
-  function onTouchEnd(e) {
-    const at = active;
-    if (!at) return;
-    const t = findTouch(e.changedTouches, at.id);
-    if (!t) return;
-    if (at.timer) { clearTimeout(at.timer); at.timer = null; }
-    if (at.speedMode) {
-      e.preventDefault();          // 阻止默认行为
-      swallowClickOnce();          // 吞掉随后产生的 click，避免误暂停
-      restore(at);
+  function onTouchEnd(event) {
+    const session = active;
+    if (!session || session.source !== "touch" || !findTouch(event.changedTouches, session.id)) return;
+    const wasActive = session.speedMode;
+    clearActive({ suppressClick: wasActive });
+    if (wasActive && event.cancelable) event.preventDefault();
+  }
+
+  function onClick(event) {
+    if (Date.now() >= suppressClickUntil) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    suppressClickUntil = 0;
+  }
+
+  function onContextMenu(event) {
+    if (!active || !active.video) return;
+    const rect = videoRect(active.video);
+    if (active.speedMode || pointInside(rect, event.clientX, event.clientY)) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
     }
-    active = null;
   }
 
-  function onContextMenu(e) {
-    // 长按视频时屏蔽原生“保存/复制”菜单
-    if (active && active.video && (e.target === active.video || active.video.contains(e.target))) {
-      e.preventDefault();
-    }
+  function isArrowRightKey(event) {
+    return event.key === "ArrowRight" || event.code === "ArrowRight" || event.keyCode === 39;
   }
 
-  /* ---------- 键盘加速：电脑端按住 Shift+方向右，松开任一键恢复 ---------- */
-
-  // 找当前播放中的最大视频；没有播放中的视频时不劫持按键（原行为放行）
-  function findPlayingVideo() {
-    const all = document.querySelectorAll("video");
-    let best = null, bestArea = 0;
-    for (const v of all) {
-      if (v.paused || v.ended) continue;
-      const r = v.getBoundingClientRect();
-      const area = r.width * r.height;
-      if (area > bestArea) { bestArea = area; best = v; }
-    }
-    return best;
+  function isShiftKey(event) {
+    return event.key === "Shift" || event.code === "ShiftLeft" ||
+      event.code === "ShiftRight" || event.keyCode === 16;
   }
 
-  function isEditable(t) {
-    if (!t) return false;
-    return t.tagName === "INPUT" || t.tagName === "TEXTAREA" ||
-           t.tagName === "SELECT" || t.isContentEditable === true;
-  }
+  function onKeyDown(event) {
+    const arrow = isArrowRightKey(event);
+    const shift = isShiftKey(event);
+    if (!arrow && !shift) return;
+    if (arrow) arrowHeld = true;
+    if (!settings.enabled || (arrow ? !event.shiftKey : !arrowHeld)) return;
+    if (isEditable(event.target)) return;
 
-  function onKeyDown(e) {
-    if (!settings.enabled) return;
-    const at = active;
-    if (at) {
-      // 加速期间吞掉组合键的自动重复等事件，避免网站同时响应
-      if (at.source === "keyboard" && (e.key === "ArrowRight" || e.key === "Shift")) {
-        e.preventDefault();
-        e.stopPropagation();
+    if (active) {
+      if (active.source === "keyboard") {
+        event.preventDefault();
+        event.stopImmediatePropagation();
       }
       return;
     }
-    if (e.key !== "ArrowRight" || !e.shiftKey) return;
-    if (isEditable(e.target)) return; // 正在输入文本时不劫持
 
     const video = findPlayingVideo();
-    if (!video) return; // 无播放中的视频，按键原样放行
-
-    e.preventDefault();
-    e.stopPropagation();
-
-    const r = video.getBoundingClientRect();
+    if (!video) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    const rect = videoRect(video);
     active = {
-      id: "keyboard",
       source: "keyboard",
+      id: "keyboard",
       video: video,
       originalRate: video.playbackRate,
       timer: null,
-      startX: r.left + r.width / 2,
-      startY: Math.max(r.top + 60, 30),
+      rateTimer: null,
+      startX: rect.left + rect.width / 2,
+      startY: Math.max(rect.top + 60, 30),
       speedMode: false,
     };
-    activate(active); // 键盘组合键即按即加速，无需长按判定延时
+    activate(active);
   }
 
-  function onKeyUp(e) {
-    const at = active;
-    if (!at || at.source !== "keyboard") return;
-    // Shift 或 方向右 任一松开即恢复原速
-    if (e.key === "Shift" || e.key === "ArrowRight") {
-      e.preventDefault();
-      e.stopPropagation();
+  function onKeyUp(event) {
+    if (isArrowRightKey(event)) arrowHeld = false;
+    if (!active || active.source !== "keyboard") return;
+    if (isArrowRightKey(event) || isShiftKey(event)) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
       clearActive();
     }
   }
 
-  /* ---------- 注册监听（capture 阶段，确保先于网站处理） ---------- */
   document.addEventListener("keydown", onKeyDown, true);
   document.addEventListener("keyup", onKeyUp, true);
+  document.addEventListener("pointerdown", onPointerDown, { passive: true, capture: true });
+  document.addEventListener("pointermove", onPointerMove, { passive: true, capture: true });
+  document.addEventListener("pointerup", onPointerEnd, { passive: false, capture: true });
+  document.addEventListener("pointercancel", onPointerEnd, { passive: false, capture: true });
   document.addEventListener("touchstart", onTouchStart, { passive: true, capture: true });
   document.addEventListener("touchmove", onTouchMove, { passive: true, capture: true });
   document.addEventListener("touchend", onTouchEnd, { passive: false, capture: true });
   document.addEventListener("touchcancel", onTouchEnd, { passive: false, capture: true });
+  document.addEventListener("click", onClick, true);
   document.addEventListener("contextmenu", onContextMenu, true);
 
-  // 页面失焦/切后台时保险性恢复
-  window.addEventListener("blur", function () { if (active) clearActive(); });
+  window.addEventListener("blur", function () {
+    arrowHeld = false;
+    clearActive();
+  });
   document.addEventListener("visibilitychange", function () {
-    if (document.hidden && active) clearActive();
+    if (!document.hidden) return;
+    arrowHeld = false;
+    clearActive();
   });
 })();

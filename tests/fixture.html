@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Long-press player test fixture</title>
+  <style>
+    html, body { margin: 0; min-height: 100%; }
+    .html5-video-player { position: relative; width: 640px; height: 360px; background: #111; }
+    video, .ytp-cued-thumbnail-overlay { position: absolute; inset: 0; width: 100%; height: 100%; }
+    .ytp-cued-thumbnail-overlay { z-index: 2; }
+  </style>
+</head>
+<body>
+  <div id="movie_player" class="html5-video-player">
+    <video></video>
+    <div class="ytp-cued-thumbnail-overlay" aria-label="YouTube-style overlay"></div>
+  </div>
+  <input aria-label="comment">
+  <script>
+    window.siteClickCount = 0;
+    window.siteKeyCount = 0;
+    window.__playing = true;
+    Object.defineProperty(HTMLMediaElement.prototype, "paused", {
+      configurable: true,
+      get: function () { return !window.__playing; }
+    });
+    Object.defineProperty(HTMLMediaElement.prototype, "ended", {
+      configurable: true,
+      get: function () { return false; }
+    });
+    document.querySelector(".ytp-cued-thumbnail-overlay").addEventListener("click", function () {
+      window.siteClickCount += 1;
+    });
+    document.addEventListener("keydown", function () { window.siteKeyCount += 1; });
+  </script>
+</body>
+</html>

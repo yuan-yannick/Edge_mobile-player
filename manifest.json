@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "长按加速播放 (Long-Press Video Speed)",
-  "version": "1.3.0",
-  "description": "在 YouTube 等网页视频中长按临时加速，松手恢复；支持鼠标、触摸、触控笔与键盘。",
+  "version": "1.4.0",
+  "description": "在 YouTube、抖音等网页视频中长按临时加速，松手恢复；支持鼠标、触摸、触控笔与键盘。",
   "permissions": ["storage"],
   "content_scripts": [
     {

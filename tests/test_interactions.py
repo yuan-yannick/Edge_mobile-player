@@ -9,6 +9,7 @@ from playwright.sync_api import sync_playwright
 ROOT = Path(__file__).resolve().parents[1]
 TEST_PORT = int(os.environ.get("LPVS_TEST_PORT", "8765"))
 BASE_URL = f"http://127.0.0.1:{TEST_PORT}/tests/fixture.html"
+DOUYIN_FIXTURE_URL = f"http://127.0.0.1:{TEST_PORT}/tests/douyin_fixture.html"
 
 
 def install_script(page, script_name):
@@ -129,6 +130,27 @@ def run_suite(browser, script_name):
     if page.evaluate("window.siteKeyCount") <= previous:
         raise AssertionError(f"{script_name}: editable key event was intercepted")
 
+    page.close()
+
+    # Douyin uses xgplayer, multiple preloaded videos and a sibling overlay. The
+    # black side area belongs to the player but lies outside the video rectangle.
+    page = browser.new_page(viewport={"width": 900, "height": 700})
+    page.goto(DOUYIN_FIXTURE_URL)
+    page.wait_for_load_state("networkidle")
+    install_script(page, script_name)
+    overlay = page.locator(".douyin-control-overlay")
+    box = overlay.bounding_box()
+    x, y = box["x"] + 30, box["y"] + box["height"] / 2
+    page.mouse.move(x, y)
+    page.mouse.down()
+    page.wait_for_timeout(430)
+    actual = page.locator("video[data-main]").evaluate("video => video.playbackRate")
+    if abs(actual - 3) > 0.01:
+        raise AssertionError(f"{script_name}: Douyin xgplayer overlay was not matched")
+    page.mouse.up()
+    actual = page.locator("video[data-main]").evaluate("video => video.playbackRate")
+    if abs(actual - 1) > 0.01:
+        raise AssertionError(f"{script_name}: Douyin xgplayer did not restore")
     page.close()
 
 

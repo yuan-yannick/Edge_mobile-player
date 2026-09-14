@@ -19,6 +19,12 @@
   const RATE_EPSILON = 0.01;
   const RATE_RECHECK_MS = 120;
   const CLICK_SUPPRESS_MS = 700;
+  const PLAYER_SELECTOR = [
+    ".html5-video-player", "#player-container", "#movie_player", "ytm-player",
+    "xg-video-container", "xg-player", ".xgplayer", ".douyin-player",
+    "[class*='basePlayerContainer']", "[data-e2e='feed-active-video']",
+    ".video-js", "[data-video-player]",
+  ].join(", ");
 
   let settings = Object.assign({}, DEFAULTS);
   let active = null;
@@ -86,9 +92,7 @@
     if (!node || node.nodeType !== Node.ELEMENT_NODE) return [];
     if (node.tagName === "VIDEO") return [node];
 
-    const player = node.closest && node.closest(
-      ".html5-video-player, #player-container, #movie_player, ytm-player, .video-js, [data-video-player]"
-    );
+    const player = node.closest && node.closest(PLAYER_SELECTOR);
     if (player) return Array.from(player.querySelectorAll("video"));
     return [];
   }
@@ -205,7 +209,7 @@
     session.originalRate = session.video.playbackRate;
     session.video.addEventListener("ratechange", onRateChange);
     applyTargetRate(session);
-    // YouTube 会在自己的长按逻辑中反复写 playbackRate；定时校正可避免被覆盖。
+    // YouTube、抖音等站点可能反复写 playbackRate；定时校正可避免被覆盖。
     session.rateTimer = setInterval(function () { applyTargetRate(session); }, RATE_RECHECK_MS);
     showBadge(settings.speed, session.startX, session.startY);
     if (settings.vibrate && navigator.vibrate) {

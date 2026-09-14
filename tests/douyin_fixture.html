@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Douyin xgplayer test fixture</title>
+  <style>
+    html, body { margin: 0; min-height: 100%; }
+    .basePlayerContainer { position: relative; width: 640px; height: 360px; background: #111; }
+    xg-video-container { position: absolute; inset: 0; display: block; }
+    xg-video-container video { position: absolute; left: 100px; top: 0; width: 440px; height: 360px; }
+    .douyin-control-overlay { position: absolute; inset: 0; z-index: 2; }
+    .preload video { position: absolute; left: 700px; top: 0; width: 10px; height: 10px; }
+  </style>
+</head>
+<body>
+  <div class="basePlayerContainer">
+    <xg-video-container><video data-main></video></xg-video-container>
+    <div class="douyin-control-overlay"></div>
+  </div>
+  <div class="preload"><video></video></div>
+  <script>
+    Object.defineProperty(HTMLMediaElement.prototype, "paused", {
+      configurable: true,
+      get: function () { return !this.hasAttribute("data-main"); }
+    });
+    Object.defineProperty(HTMLMediaElement.prototype, "ended", {
+      configurable: true,
+      get: function () { return false; }
+    });
+  </script>
+</body>
+</html>

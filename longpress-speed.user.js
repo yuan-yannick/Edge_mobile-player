@@ -3,8 +3,8 @@
 // @name:en      Long-Press Video Speed
 // @namespace    lpvs.longpress.speed
 // @version      1.3.0
-// @description  移动端长按网页视频约0.35秒即临时加速播放(默认3倍速)，松手恢复原速；电脑端鼠标左键长按视频、或按住 Shift+方向右 加速，松开恢复。配合篡改猴使用，手机 Edge / Firefox / 桌面浏览器均可用。
-// @description:en  Long-press any web video (finger or mouse, default 3x) to fast-forward temporarily; on desktop also hold Shift+Right. Release to restore. Works wherever Tampermonkey runs.
+// @description  适配 YouTube 和部分简单 HTML5 播放器：长按临时加速，松手恢复；不适配已有原生长按倍速的抖音/TikTok。
+// @description:en  Temporary long-press speed for YouTube and some simple HTML5 players. Douyin/TikTok are not supported because they provide this feature natively.
 // @author       lpvs
 // @match        *://*/*
 // @run-at       document-idle
